@@ -1,4 +1,7 @@
+# api/index.py
+
 import io
+import json
 import logging
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
@@ -7,6 +10,8 @@ from pydub import AudioSegment
 from google.cloud import speech
 from flask_cors import CORS
 import os
+import tempfile
+import contextlib
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -25,14 +30,27 @@ logging.basicConfig(
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv'}
 MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB limit
 
-# Google Cloud Speech-to-Text Credentials
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-GOOGLE_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'speech-to-text-key.json')
-if not os.path.exists(GOOGLE_CREDENTIALS_PATH):
-    logging.error(f"Google credentials file not found at {GOOGLE_CREDENTIALS_PATH}")
-    raise FileNotFoundError(f"Google credentials file not found at {GOOGLE_CREDENTIALS_PATH}")
+# Handle Google Cloud credentials from environment variable
+def setup_google_credentials():
+    """Setup Google Cloud credentials from environment variable."""
+    credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    if not credentials_json:
+        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set")
+    
+    # Create temporary credentials file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+        temp_file.write(credentials_json)
+        temp_file_path = temp_file.name
+    
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
+    return temp_file_path
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_PATH
+# Initialize Google Cloud credentials
+try:
+    credentials_path = setup_google_credentials()
+except Exception as e:
+    logging.error(f"Failed to setup Google credentials: {e}")
+    credentials_path = None
 
 # ==========================
 # Helper Functions
@@ -43,9 +61,6 @@ def allowed_file(filename):
 
 def process_video_stream(video_file_stream):
     """Process video stream using a temporary file."""
-    import tempfile
-    import contextlib
-    
     try:
         # Create a temporary file and write the video content to it
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
@@ -81,10 +96,9 @@ def process_video_stream(video_file_stream):
             return mono_stream
 
         finally:
-            # Clean up temporary video file
+            # Clean up temporary files
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp_video_path)
-            # Clean up temporary audio file if it exists
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp_audio.name)
 
@@ -108,6 +122,9 @@ def split_audio_stream(audio_stream, chunk_duration=10):
 
 def transcribe_audio_stream(audio_stream):
     """Transcribe audio from memory stream."""
+    if not credentials_path:
+        raise ValueError("Google Cloud credentials not properly configured")
+
     try:
         client = speech.SpeechClient()
         chunks = split_audio_stream(audio_stream)
@@ -178,6 +195,13 @@ def format_time(seconds):
 # Routes
 # ==========================
 
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "Video to SRT converter API is running"
+    })
+
 @app.route('/test', methods=['GET'])
 def test_srt():
     """Test endpoint that returns a sample SRT content."""
@@ -188,14 +212,6 @@ def test_srt():
         ("is", 3.0, 3.5),
         ("a", 3.5, 4.0),
         ("test", 4.0, 5.0),
-        ("subtitle", 5.0, 6.0),
-        ("file", 6.0, 7.0),
-        ("with", 7.0, 8.0),
-        ("multiple", 8.0, 9.0),
-        ("words", 9.0, 10.0),
-        ("to", 10.0, 10.5),
-        ("check", 10.5, 11.0),
-        ("formatting", 11.0, 12.0)
     ]
     
     srt_content = generate_srt_content(sample_transcript)
@@ -260,10 +276,9 @@ def upload_video():
                 audio_stream.close()
             except Exception:
                 pass
-
-# ==========================
-# Main Entry
-# ==========================
-
-if __name__ == '__main__':
-    app.run(debug=True)
+        # Cleanup Google credentials temporary file
+        if credentials_path:
+            try:
+                os.unlink(credentials_path)
+            except Exception:
+                pass
