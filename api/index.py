@@ -221,6 +221,35 @@ def test_srt():
         'message': 'This is a test SRT content'
     }), 200
 
+@app.route('/test-credentials', methods=['GET'])
+def test_credentials():
+    try:
+        credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+        if not credentials_json:
+            return jsonify({
+                'error': 'Environment variable GOOGLE_APPLICATION_CREDENTIALS_JSON not found',
+                'status': 'failed'
+            }), 400
+
+        # Try to decode base64 to verify format
+        try:
+            base64.b64decode(credentials_json)
+            return jsonify({
+                'message': 'Credentials are properly formatted',
+                'status': 'success'
+            })
+        except Exception as e:
+            return jsonify({
+                'error': f'Invalid base64 encoding: {str(e)}',
+                'status': 'failed'
+            }), 400
+
+    except Exception as e:
+        return jsonify({
+            'error': f'Error checking credentials: {str(e)}',
+            'status': 'failed'
+        }), 500
+
 @app.route('/upload', methods=['POST'])
 def upload_video():
     audio_stream = None
