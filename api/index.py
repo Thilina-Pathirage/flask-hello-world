@@ -1,14 +1,12 @@
-import os
-import uuid
 import io
 import logging
-
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 from pydub import AudioSegment
 from google.cloud import speech
 from flask_cors import CORS
+import os
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -17,30 +15,18 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # Configuration
 # ==========================
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
-# Define base directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Define upload folder within the project directory
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-
-# Create directory if it doesn't exist
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Configure Flask app settings
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# Allowed video extensions
+# Allowed video extensions and size limit
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv'}
-MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB limit for video uploads
+MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB limit
 
 # Google Cloud Speech-to-Text Credentials
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GOOGLE_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'speech-to-text-key.json')
 if not os.path.exists(GOOGLE_CREDENTIALS_PATH):
     logging.error(f"Google credentials file not found at {GOOGLE_CREDENTIALS_PATH}")
@@ -55,67 +41,88 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_PATH
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def extract_audio(video_path, unique_id):
+def process_video_stream(video_file_stream):
+    """Process video stream using a temporary file."""
+    import tempfile
+    import contextlib
+    
     try:
-        video = VideoFileClip(video_path)
+        # Create a temporary file and write the video content to it
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
+            video_file_stream.save(temp_video)
+            temp_video_path = temp_video.name
 
-        # Check video duration (max 10 minutes = 600 seconds)
-        if video.duration > 600:
-            logging.error("Video duration exceeds 10 minutes.")
-            raise ValueError("Video duration exceeds the maximum allowed limit of 10 minutes.")
+        try:
+            # Process the video from the temporary file
+            video = VideoFileClip(temp_video_path)
 
-        if not hasattr(video, 'fps'):
-            logging.error("Video file does not have a valid frame rate.")
-            raise ValueError("Invalid video file: no frame rate found.")
+            # Check video duration
+            if video.duration > 600:
+                raise ValueError("Video duration exceeds the maximum allowed limit of 10 minutes.")
 
-        stereo_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}.wav")
-        video.audio.write_audiofile(stereo_audio_path, codec='pcm_s16le')
-        logging.info(f"Stereo audio extracted to {stereo_audio_path}")
+            if not hasattr(video, 'fps'):
+                raise ValueError("Invalid video file: no frame rate found.")
 
-        mono_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_mono.wav")
-        audio = AudioSegment.from_wav(stereo_audio_path)
-        audio = audio.set_channels(1)
-        audio.export(mono_audio_path, format="wav")
-        logging.info(f"Mono audio saved to {mono_audio_path}")
+            # Create a temporary file for the audio
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+                # Extract audio to temporary file
+                video.audio.write_audiofile(temp_audio.name, codec='pcm_s16le')
+                
+                # Convert to mono using pydub
+                audio = AudioSegment.from_wav(temp_audio.name)
+                audio = audio.set_channels(1)
+                
+                mono_stream = io.BytesIO()
+                audio.export(mono_stream, format="wav")
+                mono_stream.seek(0)
 
-        os.remove(stereo_audio_path)
+            # Clean up
+            video.close()
+            return mono_stream
 
-        video.close()  # Close the video file to free resources
-        return mono_audio_path
+        finally:
+            # Clean up temporary video file
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp_video_path)
+            # Clean up temporary audio file if it exists
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp_audio.name)
+
     except Exception as e:
-        logging.exception("Failed to extract and convert audio to mono.")
+        logging.exception("Failed to process video stream.")
         raise e
 
-def split_audio(audio_path, chunk_duration=10):
-    """Split audio file into smaller chunks of the given duration (in seconds)."""
-    audio = AudioSegment.from_wav(audio_path)
+def split_audio_stream(audio_stream, chunk_duration=10):
+    """Split audio stream into smaller chunks."""
+    audio = AudioSegment.from_wav(audio_stream)
     chunks = []
-    for i in range(0, len(audio), chunk_duration * 1000):  # Convert seconds to milliseconds
+    
+    for i in range(0, len(audio), chunk_duration * 1000):
         chunk = audio[i:i + chunk_duration * 1000]
-        chunk_path = f"{audio_path.rsplit('.', 1)[0]}_chunk_{i // (chunk_duration * 1000)}.wav"
-        chunk.export(chunk_path, format="wav")
-        chunks.append(chunk_path)
+        chunk_stream = io.BytesIO()
+        chunk.export(chunk_stream, format="wav")
+        chunk_stream.seek(0)
+        chunks.append(chunk_stream)
+    
     return chunks
 
-def transcribe_audio(audio_path):
+def transcribe_audio_stream(audio_stream):
+    """Transcribe audio from memory stream."""
     try:
         client = speech.SpeechClient()
-
-        # Split audio into chunks
-        chunks = split_audio(audio_path)
+        chunks = split_audio_stream(audio_stream)
         transcript = []
-        global_start_time = 0  # Track the cumulative start time
+        global_start_time = 0
 
-        for chunk_path in chunks:
-            with io.open(chunk_path, "rb") as audio_file:
-                content = audio_file.read()
-
+        for chunk_stream in chunks:
+            content = chunk_stream.read()
+            
             audio = speech.RecognitionAudio(content=content)
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 language_code="si-LK",
                 enable_automatic_punctuation=True,
-                enable_word_time_offsets=True,  # Enable word-level timestamps
+                enable_word_time_offsets=True
             )
 
             response = client.recognize(config=config, audio=audio)
@@ -128,22 +135,20 @@ def transcribe_audio(audio_path):
                     end_time = global_start_time + word_info.end_time.total_seconds()
                     transcript.append((word, start_time, end_time))
 
-            # Update global start time with the duration of the processed chunk
-            chunk_duration = AudioSegment.from_wav(chunk_path).duration_seconds
-            global_start_time += chunk_duration
+            # Update global start time
+            chunk_stream.seek(0)
+            chunk_audio = AudioSegment.from_wav(chunk_stream)
+            global_start_time += len(chunk_audio) / 1000.0
+            chunk_stream.close()
 
-            # Clean up the chunk file
-            os.remove(chunk_path)
-
-        logging.info("Transcription completed.")
         return transcript
+
     except Exception as e:
         logging.exception("Failed to transcribe audio.")
         raise e
 
 def generate_srt_content(transcript):
-    """Generate SRT content as a string without saving to file."""
-    # Define how many words per subtitle
+    """Generate SRT content as a string."""
     words_per_subtitle = 7
     subtitles = [transcript[i:i + words_per_subtitle] for i in range(0, len(transcript), words_per_subtitle)]
 
@@ -162,7 +167,7 @@ def generate_srt_content(transcript):
     return '\n'.join(srt_content)
 
 def format_time(seconds):
-    """Helper function to format time in SRT format (HH:MM:SS,ms)."""
+    """Format time in SRT format (HH:MM:SS,ms)."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -176,7 +181,6 @@ def format_time(seconds):
 @app.route('/test', methods=['GET'])
 def test_srt():
     """Test endpoint that returns a sample SRT content."""
-    # Create a sample transcript with word timings
     sample_transcript = [
         ("Hello", 0.0, 1.0),
         ("world", 1.0, 2.0),
@@ -194,7 +198,6 @@ def test_srt():
         ("formatting", 11.0, 12.0)
     ]
     
-    # Generate SRT content from sample transcript
     srt_content = generate_srt_content(sample_transcript)
     
     return jsonify({
@@ -204,68 +207,59 @@ def test_srt():
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
+    audio_stream = None
     try:
+        # Validate request
         if 'video' not in request.files:
             logging.error('No video part in the request.')
             return jsonify({'error': 'No video part in the request.'}), 400
 
         file = request.files['video']
-
         if file.filename == '':
             logging.error('No selected video.')
             return jsonify({'error': 'No selected video.'}), 400
 
-        if file and allowed_file(file.filename):
-            # Check file size
-            file.seek(0, os.SEEK_END)
-            file_length = file.tell()
-            if file_length > MAX_VIDEO_SIZE:
-                logging.error('File is too large.')
-                return jsonify({'error': 'File is too large. Maximum allowed size is 200 MB.'}), 400
-            
-            file.seek(0)  # Reset file pointer after checking size
-            
-            filename = secure_filename(file.filename)
-            unique_id = str(uuid.uuid4())
-            saved_filename = f"{unique_id}_{filename}"
-            saved_path = os.path.join(app.config['UPLOAD_FOLDER'], saved_filename)
-            file.save(saved_path)
-            logging.info(f"Video saved to {saved_path}")
-
-            try:
-                # Extract audio
-                audio_path = extract_audio(saved_path, unique_id)
-
-                # Transcribe audio
-                transcript = transcribe_audio(audio_path)
-
-                if not transcript:
-                    logging.error("No transcription result.")
-                    return jsonify({'error': 'Failed to transcribe audio.'}), 500
-
-                # Generate SRT content directly
-                srt_content = generate_srt_content(transcript)
-
-                # Return the SRT content in JSON response
-                return jsonify({
-                    'srtContent': srt_content
-                }), 200
-
-            except Exception as processing_error:
-                logging.error(f"Error during video processing: {processing_error}")
-                return jsonify({'error': 'Error processing video.'}), 500
-            finally:
-                # Cleanup: Remove the uploaded video and audio files
-                if os.path.exists(saved_path):
-                    os.remove(saved_path)
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-        else:
+        if not allowed_file(file.filename):
             logging.error('Unsupported file type.')
-            return jsonify({'error': 'Unsupported file type.'}), 400
+            return jsonify({'error': f'Unsupported file type. Allowed types are: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+        # Check file size
+        content_length = request.content_length
+        if content_length and content_length > MAX_VIDEO_SIZE:
+            logging.error('File is too large.')
+            return jsonify({'error': f'File is too large. Maximum allowed size is {MAX_VIDEO_SIZE/1024/1024:.0f}MB'}), 400
+
+        # Process video
+        audio_stream = process_video_stream(file)
+        
+        # Transcribe audio
+        transcript = transcribe_audio_stream(audio_stream)
+        
+        if not transcript:
+            logging.error("No transcription result.")
+            return jsonify({'error': 'Failed to transcribe audio. No speech detected.'}), 500
+
+        # Generate SRT content
+        srt_content = generate_srt_content(transcript)
+        
+        return jsonify({
+            'srtContent': srt_content,
+            'message': 'Video processed successfully'
+        }), 200
+
+    except ValueError as ve:
+        logging.error(f"Validation error: {str(ve)}")
+        return jsonify({'error': str(ve)}), 400
     except Exception as e:
-        logging.exception("Unexpected error during upload.")
-        return jsonify({'error': 'Unexpected error occurred.'}), 500
+        logging.exception("Unexpected error during upload")
+        return jsonify({'error': 'An unexpected error occurred while processing the video.'}), 500
+    finally:
+        # Clean up resources
+        if audio_stream:
+            try:
+                audio_stream.close()
+            except Exception:
+                pass
 
 # ==========================
 # Main Entry
@@ -273,4 +267,3 @@ def upload_video():
 
 if __name__ == '__main__':
     app.run(debug=True)
-    
