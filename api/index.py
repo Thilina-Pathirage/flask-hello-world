@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import base64
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
@@ -30,26 +31,41 @@ logging.basicConfig(
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv'}
 MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB limit
 
-# Handle Google Cloud credentials from environment variable
 def setup_google_credentials():
     """Setup Google Cloud credentials from environment variable."""
-    credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-    if not credentials_json:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set")
-    
-    # Create temporary credentials file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-        temp_file.write(credentials_json)
-        temp_file_path = temp_file.name
-    
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
-    return temp_file_path
+    try:
+        # Get the base64 encoded credentials
+        credentials_json_b64 = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+        if not credentials_json_b64:
+            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set")
+
+        # Decode the base64 string
+        try:
+            credentials_json = base64.b64decode(credentials_json_b64).decode('utf-8')
+        except Exception as e:
+            raise ValueError(f"Invalid base64 encoding in credentials: {str(e)}")
+
+        # Create a temporary file to store the credentials
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+            temp_file.write(credentials_json)
+            temp_file_path = temp_file.name
+
+        # Set the environment variable to point to the temporary file
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
+        return temp_file_path
+
+    except Exception as e:
+        logging.error(f"Failed to setup Google credentials: {e}")
+        raise
 
 # Initialize Google Cloud credentials
 try:
     credentials_path = setup_google_credentials()
+    # Verify credentials by creating a client
+    speech.SpeechClient()
+    logging.info("Google Cloud credentials successfully initialized")
 except Exception as e:
-    logging.error(f"Failed to setup Google credentials: {e}")
+    logging.error(f"Failed to initialize Google credentials: {e}")
     credentials_path = None
 
 # ==========================
@@ -61,50 +77,54 @@ def allowed_file(filename):
 
 def process_video_stream(video_file_stream):
     """Process video stream using a temporary file."""
+    temp_video_path = None
+    temp_audio_path = None
+    
     try:
         # Create a temporary file and write the video content to it
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
             video_file_stream.save(temp_video)
             temp_video_path = temp_video.name
 
-        try:
-            # Process the video from the temporary file
-            video = VideoFileClip(temp_video_path)
+        # Process the video from the temporary file
+        video = VideoFileClip(temp_video_path)
 
-            # Check video duration
-            if video.duration > 600:
-                raise ValueError("Video duration exceeds the maximum allowed limit of 10 minutes.")
+        # Check video duration
+        if video.duration > 600:
+            raise ValueError("Video duration exceeds the maximum allowed limit of 10 minutes.")
 
-            if not hasattr(video, 'fps'):
-                raise ValueError("Invalid video file: no frame rate found.")
+        if not hasattr(video, 'fps'):
+            raise ValueError("Invalid video file: no frame rate found.")
 
-            # Create a temporary file for the audio
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                # Extract audio to temporary file
-                video.audio.write_audiofile(temp_audio.name, codec='pcm_s16le')
-                
-                # Convert to mono using pydub
-                audio = AudioSegment.from_wav(temp_audio.name)
-                audio = audio.set_channels(1)
-                
-                mono_stream = io.BytesIO()
-                audio.export(mono_stream, format="wav")
-                mono_stream.seek(0)
+        # Create a temporary file for the audio
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+            temp_audio_path = temp_audio.name
+            # Extract audio to temporary file
+            video.audio.write_audiofile(temp_audio_path, codec='pcm_s16le')
+            
+            # Convert to mono using pydub
+            audio = AudioSegment.from_wav(temp_audio_path)
+            audio = audio.set_channels(1)
+            
+            mono_stream = io.BytesIO()
+            audio.export(mono_stream, format="wav")
+            mono_stream.seek(0)
 
-            # Clean up
-            video.close()
-            return mono_stream
-
-        finally:
-            # Clean up temporary files
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp_video_path)
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp_audio.name)
+        # Clean up
+        video.close()
+        return mono_stream
 
     except Exception as e:
         logging.exception("Failed to process video stream.")
-        raise e
+        raise
+    finally:
+        # Clean up temporary files
+        for path in [temp_video_path, temp_audio_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except Exception as e:
+                    logging.error(f"Error deleting temporary file {path}: {e}")
 
 def split_audio_stream(audio_stream, chunk_duration=10):
     """Split audio stream into smaller chunks."""
@@ -122,7 +142,7 @@ def split_audio_stream(audio_stream, chunk_duration=10):
 
 def transcribe_audio_stream(audio_stream):
     """Transcribe audio from memory stream."""
-    if not credentials_path:
+    if not os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
         raise ValueError("Google Cloud credentials not properly configured")
 
     try:
@@ -162,10 +182,13 @@ def transcribe_audio_stream(audio_stream):
 
     except Exception as e:
         logging.exception("Failed to transcribe audio.")
-        raise e
+        raise
 
 def generate_srt_content(transcript):
     """Generate SRT content as a string."""
+    if not transcript:
+        return ""
+        
     words_per_subtitle = 7
     subtitles = [transcript[i:i + words_per_subtitle] for i in range(0, len(transcript), words_per_subtitle)]
 
@@ -199,80 +222,61 @@ def format_time(seconds):
 def home():
     return jsonify({
         "status": "ok",
-        "message": "Video to SRT converter API is running"
+        "message": "Video to SRT converter API is running",
+        "credentials_status": "configured" if credentials_path else "not configured"
     })
-
-@app.route('/test', methods=['GET'])
-def test_srt():
-    """Test endpoint that returns a sample SRT content."""
-    sample_transcript = [
-        ("Hello", 0.0, 1.0),
-        ("world", 1.0, 2.0),
-        ("this", 2.0, 3.0),
-        ("is", 3.0, 3.5),
-        ("a", 3.5, 4.0),
-        ("test", 4.0, 5.0),
-    ]
-    
-    srt_content = generate_srt_content(sample_transcript)
-    
-    return jsonify({
-        'srtContent': srt_content,
-        'message': 'This is a test SRT content'
-    }), 200
 
 @app.route('/test-credentials', methods=['GET'])
 def test_credentials():
     try:
-        credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-        if not credentials_json:
+        if not credentials_path:
             return jsonify({
-                'error': 'Environment variable GOOGLE_APPLICATION_CREDENTIALS_JSON not found',
+                'error': 'Credentials not initialized',
                 'status': 'failed'
-            }), 400
+            }), 500
 
-        # Try to decode base64 to verify format
-        try:
-            base64.b64decode(credentials_json)
-            return jsonify({
-                'message': 'Credentials are properly formatted',
-                'status': 'success'
-            })
-        except Exception as e:
-            return jsonify({
-                'error': f'Invalid base64 encoding: {str(e)}',
-                'status': 'failed'
-            }), 400
+        # Try to create a speech client to verify credentials
+        client = speech.SpeechClient()
+        
+        return jsonify({
+            'message': 'Credentials working correctly',
+            'status': 'success'
+        })
 
     except Exception as e:
         return jsonify({
-            'error': f'Error checking credentials: {str(e)}',
+            'error': f'Error testing credentials: {str(e)}',
             'status': 'failed'
         }), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
     audio_stream = None
+    
     try:
+        # Validate credentials
+        if not credentials_path:
+            return jsonify({'error': 'Google Cloud credentials not configured'}), 500
+
         # Validate request
         if 'video' not in request.files:
-            logging.error('No video part in the request.')
-            return jsonify({'error': 'No video part in the request.'}), 400
+            return jsonify({'error': 'No video file provided'}), 400
 
         file = request.files['video']
         if file.filename == '':
-            logging.error('No selected video.')
-            return jsonify({'error': 'No selected video.'}), 400
+            return jsonify({'error': 'No selected video'}), 400
 
         if not allowed_file(file.filename):
-            logging.error('Unsupported file type.')
-            return jsonify({'error': f'Unsupported file type. Allowed types are: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+            return jsonify({
+                'error': f'Unsupported file type. Allowed types are: {", ".join(ALLOWED_EXTENSIONS)}'
+            }), 400
 
         # Check file size
         content_length = request.content_length
         if content_length and content_length > MAX_VIDEO_SIZE:
-            logging.error('File is too large.')
-            return jsonify({'error': f'File is too large. Maximum allowed size is {MAX_VIDEO_SIZE/1024/1024:.0f}MB'}), 400
+            return jsonify({
+                'error': f'File too large. Maximum size is {MAX_VIDEO_SIZE/1024/1024:.0f}MB'
+            }), 400
 
         # Process video
         audio_stream = process_video_stream(file)
@@ -281,33 +285,30 @@ def upload_video():
         transcript = transcribe_audio_stream(audio_stream)
         
         if not transcript:
-            logging.error("No transcription result.")
-            return jsonify({'error': 'Failed to transcribe audio. No speech detected.'}), 500
+            return jsonify({'error': 'No speech detected in the video'}), 400
 
         # Generate SRT content
         srt_content = generate_srt_content(transcript)
         
+        if not srt_content:
+            return jsonify({'error': 'Failed to generate subtitles'}), 500
+
         return jsonify({
             'srtContent': srt_content,
             'message': 'Video processed successfully'
         }), 200
 
     except ValueError as ve:
-        logging.error(f"Validation error: {str(ve)}")
         return jsonify({'error': str(ve)}), 400
     except Exception as e:
-        logging.exception("Unexpected error during upload")
-        return jsonify({'error': 'An unexpected error occurred while processing the video.'}), 500
+        logging.exception("Error processing video")
+        return jsonify({'error': str(e)}), 500
     finally:
-        # Clean up resources
         if audio_stream:
             try:
                 audio_stream.close()
             except Exception:
                 pass
-        # Cleanup Google credentials temporary file
-        if credentials_path:
-            try:
-                os.unlink(credentials_path)
-            except Exception:
-                pass
+
+if __name__ == '__main__':
+    app.run(debug=True)
