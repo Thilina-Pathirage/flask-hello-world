@@ -3,7 +3,7 @@ import uuid
 import io
 import logging
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 from pydub import AudioSegment
@@ -27,17 +27,14 @@ logging.basicConfig(
 # Define base directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Define upload and SRT folders within the project directory
+# Define upload folder within the project directory
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-SRT_FOLDER = os.path.join(BASE_DIR, 'srt')
 
-# Create directories if they don't exist
+# Create directory if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(SRT_FOLDER, exist_ok=True)
 
 # Configure Flask app settings
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['SRT_FOLDER'] = SRT_FOLDER
 
 # Allowed video extensions
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv'}
@@ -144,25 +141,25 @@ def transcribe_audio(audio_path):
         logging.exception("Failed to transcribe audio.")
         raise e
 
-
-def generate_srt(transcript, unique_id):
-    srt_path = os.path.join(app.config['SRT_FOLDER'], f"{unique_id}.srt")
-
+def generate_srt_content(transcript):
+    """Generate SRT content as a string without saving to file."""
     # Define how many words per subtitle
     words_per_subtitle = 7
     subtitles = [transcript[i:i + words_per_subtitle] for i in range(0, len(transcript), words_per_subtitle)]
 
-    with open(srt_path, 'w', encoding='utf-8') as srt_file:
-        for i, subtitle in enumerate(subtitles):
-            start_time = subtitle[0][1]
-            end_time = subtitle[-1][2]
-            text = ' '.join([word[0] for word in subtitle])
+    srt_content = []
+    for i, subtitle in enumerate(subtitles):
+        start_time = subtitle[0][1]
+        end_time = subtitle[-1][2]
+        text = ' '.join([word[0] for word in subtitle])
 
-            srt_file.write(f"{i + 1}\n")
-            srt_file.write(f"{format_time(start_time)} --> {format_time(end_time)}\n")
-            srt_file.write(f"{text}\n\n")
+        srt_content.extend([
+            str(i + 1),
+            f"{format_time(start_time)} --> {format_time(end_time)}",
+            f"{text}\n"
+        ])
 
-    return srt_path
+    return '\n'.join(srt_content)
 
 def format_time(seconds):
     """Helper function to format time in SRT format (HH:MM:SS,ms)."""
@@ -172,15 +169,38 @@ def format_time(seconds):
     milliseconds = int((seconds - int(seconds)) * 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
 
-def read_srt_file(srt_path):
-    """Reads the SRT file and returns its content as a string."""
-    with open(srt_path, 'r', encoding='utf-8') as file:
-        content = file.read()
-    return content
-
 # ==========================
 # Routes
 # ==========================
+
+@app.route('/test', methods=['GET'])
+def test_srt():
+    """Test endpoint that returns a sample SRT content."""
+    # Create a sample transcript with word timings
+    sample_transcript = [
+        ("Hello", 0.0, 1.0),
+        ("world", 1.0, 2.0),
+        ("this", 2.0, 3.0),
+        ("is", 3.0, 3.5),
+        ("a", 3.5, 4.0),
+        ("test", 4.0, 5.0),
+        ("subtitle", 5.0, 6.0),
+        ("file", 6.0, 7.0),
+        ("with", 7.0, 8.0),
+        ("multiple", 8.0, 9.0),
+        ("words", 9.0, 10.0),
+        ("to", 10.0, 10.5),
+        ("check", 10.5, 11.0),
+        ("formatting", 11.0, 12.0)
+    ]
+    
+    # Generate SRT content from sample transcript
+    srt_content = generate_srt_content(sample_transcript)
+    
+    return jsonify({
+        'srtContent': srt_content,
+        'message': 'This is a test SRT content'
+    }), 200
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
@@ -223,11 +243,8 @@ def upload_video():
                     logging.error("No transcription result.")
                     return jsonify({'error': 'Failed to transcribe audio.'}), 500
 
-                # Generate SRT
-                srt_path = generate_srt(transcript, unique_id)
-
-                # Read SRT content
-                srt_content = read_srt_file(srt_path)
+                # Generate SRT content directly
+                srt_content = generate_srt_content(transcript)
 
                 # Return the SRT content in JSON response
                 return jsonify({
@@ -250,19 +267,10 @@ def upload_video():
         logging.exception("Unexpected error during upload.")
         return jsonify({'error': 'Unexpected error occurred.'}), 500
 
-# Optional: Route to download the SRT file
-@app.route('/srt/<filename>', methods=['GET'])
-def download_srt(filename):
-    srt_path = os.path.join(app.config['SRT_FOLDER'], filename)
-    if os.path.exists(srt_path):
-        return send_file(srt_path, as_attachment=True, mimetype='text/srt')
-    else:
-        logging.error(f"SRT file not found: {srt_path}")
-        return jsonify({'error': 'File not found.'}), 404
-
 # ==========================
 # Main Entry
 # ==========================
 
 if __name__ == '__main__':
     app.run(debug=True)
+    
