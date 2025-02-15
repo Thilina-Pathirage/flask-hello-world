@@ -6,7 +6,7 @@ click==8.1.7
 colorama==0.4.6
 decorator==4.4.2
 Flask==2.3.3
-Flask-Cors==4.0.0
+Flask-CORS==5.0.0
 google-api-core==2.11.1
 google-auth==2.22.0
 google-cloud-speech==2.21.0
