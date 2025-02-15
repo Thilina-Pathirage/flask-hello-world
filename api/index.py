@@ -1,5 +1,3 @@
-# api/index.py
-
 import io
 import json
 import logging
@@ -15,7 +13,27 @@ import tempfile
 import contextlib
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Updated CORS configuration
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://unicap.thilina.info"],  # Specify your frontend domain
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "supports_credentials": True,
+        "max_age": 600  # Cache preflight requests for 10 minutes
+    }
+})
+
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://unicap.thilina.info')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 # ==========================
 # Configuration
@@ -248,6 +266,11 @@ def test_credentials():
             'error': f'Error testing credentials: {str(e)}',
             'status': 'failed'
         }), 500
+
+# Handle OPTIONS requests explicitly
+@app.route('/upload', methods=['OPTIONS'])
+def handle_options():
+    return '', 204
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
