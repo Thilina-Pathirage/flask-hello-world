@@ -2,7 +2,7 @@ import io
 import json
 import logging
 import base64
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 from pydub import AudioSegment
@@ -17,20 +17,29 @@ import sys
 app = Flask(__name__)
 
 # Updated CORS configuration
-CORS(app, 
-     origins=["https://unicap.thilina.info"],
-     methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization"],
-     supports_credentials=True,
-     max_age=600)
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://unicap.thilina.info", "http://localhost:5173"],  # Specify your frontend domains
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "supports_credentials": True,
+        "max_age": 600  # Cache preflight requests for 10 minutes
+    }
+})
 
-# Add CORS headers to all responses (as backup)
+# Add CORS headers to all responses
 @app.after_request
 def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = 'https://unicap.thilina.info'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    allowed_origins = ["https://unicap.thilina.info", "http://localhost:5173"]
+    origin = request.headers.get('Origin')
+    
+    if origin in allowed_origins:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
 
 # ==========================
@@ -395,17 +404,7 @@ def run_unit_tests():
     
     return jsonify(test_results), 200 if test_results['overall_status'] == 'passed' else 500
 
-# Handle OPTIONS requests explicitly for all routes
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = 'https://unicap.thilina.info'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
-        return response
-
+# Handle OPTIONS requests explicitly
 @app.route('/upload', methods=['OPTIONS'])
 def handle_options():
     return '', 204
