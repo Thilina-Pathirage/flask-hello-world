@@ -250,7 +250,7 @@ def transcribe_video_with_intelligence(video_content):
         speech_config = videointelligence.SpeechTranscriptionConfig(
             language_code="si-LK",
             enable_automatic_punctuation=True,
-            enable_word_time_offsets=True
+            enable_word_confidence=True
         )
         
         # Create video context
@@ -437,7 +437,7 @@ def run_unit_tests():
             speech_config = videointelligence.SpeechTranscriptionConfig(
                 language_code="si-LK",
                 enable_automatic_punctuation=True,
-                enable_word_time_offsets=True
+                enable_word_confidence=True
             )
             add_test_result('gcp_video_intelligence_connection', True, 'GCP Video Intelligence API connection successful', {
                 'client_info': str(type(client)),
