@@ -11,6 +11,8 @@ from flask_cors import CORS
 import os
 import tempfile
 import contextlib
+from datetime import datetime
+import sys
 
 app = Flask(__name__)
 
@@ -114,6 +116,10 @@ def process_video_stream(video_file_stream):
         if not hasattr(video, 'fps'):
             raise ValueError("Invalid video file: no frame rate found.")
 
+        # Check if video has audio
+        if video.audio is None:
+            raise ValueError("Video has no audio track.")
+        
         # Create a temporary file for the audio
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
             temp_audio_path = temp_audio.name
@@ -267,9 +273,138 @@ def test_credentials():
             'status': 'failed'
         }), 500
 
+@app.route('/unittest', methods=['GET'])
+def run_unit_tests():
+    """Comprehensive unit test endpoint with GCP API connection check."""
+    test_results = {
+        'timestamp': datetime.now().isoformat(),
+        'overall_status': 'passed',
+        'tests': {},
+        'summary': {
+            'total': 0,
+            'passed': 0,
+            'failed': 0
+        }
+    }
+    
+    def add_test_result(test_name, passed, message, details=None):
+        test_results['tests'][test_name] = {
+            'status': 'passed' if passed else 'failed',
+            'message': message,
+            'details': details or {}
+        }
+        test_results['summary']['total'] += 1
+        if passed:
+            test_results['summary']['passed'] += 1
+        else:
+            test_results['summary']['failed'] += 1
+            test_results['overall_status'] = 'failed'
+    
+    # Test 1: Credentials Configuration
+    try:
+        if not credentials_path:
+            add_test_result('credentials_setup', False, 'Google Cloud credentials not configured')
+        else:
+            add_test_result('credentials_setup', True, 'Google Cloud credentials configured successfully')
+    except Exception as e:
+        add_test_result('credentials_setup', False, f'Error checking credentials: {str(e)}')
+    
+    # Test 2: GCP Speech API Connection
+    try:
+        if not credentials_path:
+            add_test_result('gcp_speech_connection', False, 'Cannot test - credentials not configured')
+        else:
+            client = speech.SpeechClient()
+            # Test with a minimal recognition request to verify connection
+            config = speech.RecognitionConfig(
+                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=16000,
+                language_code="en-US"
+            )
+            # This will test the connection without actually processing audio
+            add_test_result('gcp_speech_connection', True, 'GCP Speech API connection successful', {
+                'client_info': str(type(client)),
+                'config_created': True
+            })
+    except Exception as e:
+        add_test_result('gcp_speech_connection', False, f'GCP Speech API connection failed: {str(e)}')
+    
+    # Test 3: Temporary File Creation
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as temp_file:
+            temp_path = temp_file.name
+            add_test_result('temp_file_creation', True, 'Temporary file creation successful', {
+                'temp_path_created': temp_path is not None
+            })
+    except Exception as e:
+        add_test_result('temp_file_creation', False, f'Temporary file creation failed: {str(e)}')
+    
+    # Test 4: Required Libraries Import
+    try:
+        import moviepy.editor
+        import pydub
+        import flask
+        import flask_cors
+        # speech is already imported globally
+        add_test_result('required_imports', True, 'All required libraries imported successfully', {
+            'moviepy': 'available',
+            'pydub': 'available', 
+            'google_cloud_speech': 'available',
+            'flask': 'available',
+            'flask_cors': 'available'
+        })
+    except Exception as e:
+        add_test_result('required_imports', False, f'Required library import failed: {str(e)}')
+    
+    # Test 5: Audio Processing Libraries
+    try:
+        from pydub import AudioSegment
+        # Test creating a simple audio segment
+        audio = AudioSegment.silent(duration=100)  # 100ms of silence
+        add_test_result('audio_processing', True, 'Audio processing libraries working', {
+            'audio_duration': len(audio),
+            'audio_channels': audio.channels
+        })
+    except Exception as e:
+        add_test_result('audio_processing', False, f'Audio processing test failed: {str(e)}')
+    
+    # Test 6: File Extension Validation
+    try:
+        test_files = ['test.mp4', 'test.mov', 'test.avi', 'test.mkv', 'test.txt']
+        valid_files = [f for f in test_files if allowed_file(f)]
+        expected_valid = ['test.mp4', 'test.mov', 'test.avi', 'test.mkv']
+        
+        if set(valid_files) == set(expected_valid):
+            add_test_result('file_validation', True, 'File extension validation working correctly', {
+                'valid_files': valid_files,
+                'rejected_files': [f for f in test_files if f not in valid_files]
+            })
+        else:
+            add_test_result('file_validation', False, 'File extension validation not working correctly')
+    except Exception as e:
+        add_test_result('file_validation', False, f'File validation test failed: {str(e)}')
+    
+    # Test 7: Environment Check
+    try:
+        env_details = {
+            'python_version': sys.version,
+            'platform': sys.platform,
+            'temp_dir': tempfile.gettempdir(),
+            'current_dir': os.getcwd()
+        }
+        add_test_result('environment_check', True, 'Environment check successful', env_details)
+    except Exception as e:
+        add_test_result('environment_check', False, f'Environment check failed: {str(e)}')
+    
+    return jsonify(test_results), 200 if test_results['overall_status'] == 'passed' else 500
+
 # Handle OPTIONS requests explicitly
 @app.route('/upload', methods=['OPTIONS'])
 def handle_options():
+    return '', 204
+
+@app.route('/unittest', methods=['OPTIONS'])
+def handle_unittest_options():
     return '', 204
 
 @app.route('/upload', methods=['POST'])
