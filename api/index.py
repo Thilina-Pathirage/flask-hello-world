@@ -7,7 +7,6 @@ from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 from pydub import AudioSegment
 from google.cloud import speech
-from google.cloud import videointelligence
 from flask_cors import CORS
 import os
 import tempfile
@@ -82,9 +81,8 @@ def setup_google_credentials():
 # Initialize Google Cloud credentials
 try:
     credentials_path = setup_google_credentials()
-    # Verify credentials by creating clients
+    # Verify credentials by creating a client
     speech.SpeechClient()
-    videointelligence.VideoIntelligenceServiceClient()
     logging.info("Google Cloud credentials successfully initialized")
 except Exception as e:
     logging.error(f"Failed to initialize Google credentials: {e}")
@@ -152,44 +150,19 @@ def process_video_stream(video_file_stream):
                 except Exception as e:
                     logging.error(f"Error deleting temporary file {path}: {e}")
 
-def process_video_with_intelligence(video_file_stream):
-    """Process video using Google Cloud Video Intelligence API."""
-    temp_video_path = None
+def split_audio_stream(audio_stream, chunk_duration=10):
+    """Split audio stream into smaller chunks."""
+    audio = AudioSegment.from_wav(audio_stream)
+    chunks = []
     
-    try:
-        # Create a temporary file and write the video content to it
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
-            video_file_stream.save(temp_video)
-            temp_video_path = temp_video.name
-
-        # Basic video validation using moviepy
-        video = VideoFileClip(temp_video_path)
-        
-        # Check video duration
-        if video.duration > 600:
-            raise ValueError("Video duration exceeds the maximum allowed limit of 10 minutes.")
-
-        if not hasattr(video, 'fps'):
-            raise ValueError("Invalid video file: no frame rate found.")
-
-        video.close()
-
-        # Read video file content for Video Intelligence API
-        with open(temp_video_path, 'rb') as video_file:
-            video_content = video_file.read()
-
-        return video_content
-
-    except Exception as e:
-        logging.exception("Failed to process video for intelligence API.")
-        raise
-    finally:
-        # Clean up temporary files
-        if temp_video_path and os.path.exists(temp_video_path):
-            try:
-                os.unlink(temp_video_path)
-            except Exception as e:
-                logging.error(f"Error deleting temporary file {temp_video_path}: {e}")
+    for i in range(0, len(audio), chunk_duration * 1000):
+        chunk = audio[i:i + chunk_duration * 1000]
+        chunk_stream = io.BytesIO()
+        chunk.export(chunk_stream, format="wav")
+        chunk_stream.seek(0)
+        chunks.append(chunk_stream)
+    
+    return chunks
 
 def transcribe_audio_stream(audio_stream):
     """Transcribe audio from memory stream."""
@@ -209,6 +182,7 @@ def transcribe_audio_stream(audio_stream):
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 language_code="si-LK",
+                model="video",
                 enable_automatic_punctuation=True,
                 enable_word_time_offsets=True
             )
@@ -234,77 +208,6 @@ def transcribe_audio_stream(audio_stream):
     except Exception as e:
         logging.exception("Failed to transcribe audio.")
         raise
-
-def transcribe_video_with_intelligence(video_content):
-    """Transcribe video using Google Cloud Video Intelligence API."""
-    if not os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
-        raise ValueError("Google Cloud credentials not properly configured")
-
-    try:
-        client = videointelligence.VideoIntelligenceServiceClient()
-        
-        # Configure the request
-        features = [videointelligence.Feature.SPEECH_TRANSCRIPTION]
-        
-        # Set up speech transcription config
-        speech_config = videointelligence.SpeechTranscriptionConfig(
-            language_code="si-LK",
-            enable_automatic_punctuation=True,
-            enable_word_confidence=True
-        )
-        
-        # Create video context
-        video_context = videointelligence.VideoContext(
-            speech_transcription_config=speech_config
-        )
-
-        # Create the request
-        request = videointelligence.AnnotateVideoRequest(
-            input_content=video_content,
-            features=features,
-            video_context=video_context
-        )
-
-        # Make the request
-        operation = client.annotate_video(request=request)
-        
-        logging.info("Processing video with Video Intelligence API...")
-        result = operation.result(timeout=300)  # 5 minutes timeout
-
-        # Extract transcription results
-        transcript = []
-        
-        # Check if we have annotation results
-        if result and hasattr(result, 'annotation_results') and result.annotation_results:
-            # Process speech transcription results
-            for speech_transcription in result.annotation_results[0].speech_transcriptions:
-                # Each speech transcription contains multiple alternatives
-                for alternative in speech_transcription.alternatives:
-                    for word_info in alternative.words:
-                        word = word_info.word
-                        start_time = word_info.start_time.total_seconds()
-                        end_time = word_info.end_time.total_seconds()
-                        transcript.append((word, start_time, end_time))
-
-        return transcript
-
-    except Exception as e:
-        logging.exception("Failed to transcribe video using Video Intelligence API.")
-        raise
-
-def split_audio_stream(audio_stream, chunk_duration=10):
-    """Split audio stream into smaller chunks."""
-    audio = AudioSegment.from_wav(audio_stream)
-    chunks = []
-    
-    for i in range(0, len(audio), chunk_duration * 1000):
-        chunk = audio[i:i + chunk_duration * 1000]
-        chunk_stream = io.BytesIO()
-        chunk.export(chunk_stream, format="wav")
-        chunk_stream.seek(0)
-        chunks.append(chunk_stream)
-    
-    return chunks
 
 def generate_srt_content(transcript):
     """Generate SRT content as a string."""
@@ -426,28 +329,8 @@ def run_unit_tests():
             })
     except Exception as e:
         add_test_result('gcp_speech_connection', False, f'GCP Speech API connection failed: {str(e)}')
-
-    # Test 3: GCP Video Intelligence API Connection
-    try:
-        if not credentials_path:
-            add_test_result('gcp_video_intelligence_connection', False, 'Cannot test - credentials not configured')
-        else:
-            client = videointelligence.VideoIntelligenceServiceClient()
-            # Test video intelligence configuration
-            speech_config = videointelligence.SpeechTranscriptionConfig(
-                language_code="si-LK",
-                enable_automatic_punctuation=True,
-                enable_word_confidence=True
-            )
-            add_test_result('gcp_video_intelligence_connection', True, 'GCP Video Intelligence API connection successful', {
-                'client_info': str(type(client)),
-                'speech_config_created': True,
-                'language_code': 'si-LK'
-            })
-    except Exception as e:
-        add_test_result('gcp_video_intelligence_connection', False, f'GCP Video Intelligence API connection failed: {str(e)}')
     
-    # Test 4: Temporary File Creation
+    # Test 3: Temporary File Creation
     try:
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as temp_file:
             temp_path = temp_file.name
@@ -457,25 +340,24 @@ def run_unit_tests():
     except Exception as e:
         add_test_result('temp_file_creation', False, f'Temporary file creation failed: {str(e)}')
     
-    # Test 5: Required Libraries Import
+    # Test 4: Required Libraries Import
     try:
         import moviepy.editor
         import pydub
         import flask
         import flask_cors
-        # speech and videointelligence are already imported globally
+        # speech is already imported globally
         add_test_result('required_imports', True, 'All required libraries imported successfully', {
             'moviepy': 'available',
             'pydub': 'available', 
             'google_cloud_speech': 'available',
-            'google_cloud_videointelligence': 'available',
             'flask': 'available',
             'flask_cors': 'available'
         })
     except Exception as e:
         add_test_result('required_imports', False, f'Required library import failed: {str(e)}')
     
-    # Test 6: Audio Processing Libraries
+    # Test 5: Audio Processing Libraries
     try:
         from pydub import AudioSegment
         # Test creating a simple audio segment
@@ -487,7 +369,7 @@ def run_unit_tests():
     except Exception as e:
         add_test_result('audio_processing', False, f'Audio processing test failed: {str(e)}')
     
-    # Test 7: File Extension Validation
+    # Test 6: File Extension Validation
     try:
         test_files = ['test.mp4', 'test.mov', 'test.avi', 'test.mkv', 'test.txt']
         valid_files = [f for f in test_files if allowed_file(f)]
@@ -503,7 +385,7 @@ def run_unit_tests():
     except Exception as e:
         add_test_result('file_validation', False, f'File validation test failed: {str(e)}')
     
-    # Test 8: Environment Check
+    # Test 7: Environment Check
     try:
         env_details = {
             'python_version': sys.version,
@@ -528,7 +410,7 @@ def handle_unittest_options():
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    video_content = None
+    audio_stream = None
     
     try:
         # Validate credentials
@@ -555,11 +437,11 @@ def upload_video():
                 'error': f'File too large. Maximum size is {MAX_VIDEO_SIZE/1024/1024:.0f}MB'
             }), 400
 
-        # Process video using Video Intelligence API
-        video_content = process_video_with_intelligence(file)
+        # Process video
+        audio_stream = process_video_stream(file)
         
-        # Transcribe video using Video Intelligence API
-        transcript = transcribe_video_with_intelligence(video_content)
+        # Transcribe audio
+        transcript = transcribe_audio_stream(audio_stream)
         
         if not transcript:
             return jsonify({'error': 'No speech detected in the video'}), 400
@@ -572,7 +454,7 @@ def upload_video():
 
         return jsonify({
             'srtContent': srt_content,
-            'message': 'Video processed successfully using Video Intelligence API'
+            'message': 'Video processed successfully'
         }), 200
 
     except ValueError as ve:
@@ -581,8 +463,11 @@ def upload_video():
         logging.exception("Error processing video")
         return jsonify({'error': str(e)}), 500
     finally:
-        # Clean up if needed
-        video_content = None
+        if audio_stream:
+            try:
+                audio_stream.close()
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     app.run(debug=True)
