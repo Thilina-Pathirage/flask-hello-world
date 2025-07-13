@@ -182,7 +182,7 @@ def transcribe_audio_stream(audio_stream):
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 language_code="si-LK",
-                model="video",
+                model="default",
                 enable_automatic_punctuation=True,
                 enable_word_time_offsets=True
             )
